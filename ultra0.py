@@ -18,7 +18,7 @@ Requirements:
 WARNING: non-list mode can open Google Play checkout and tap Subscribe.
 Offer metadata does not prove eligibility or subscription activation.
 """
-import argparse, base64, hashlib, hmac, json, os, re, struct, subprocess, sys, threading, time
+import argparse, base64, hashlib, hmac, json, os, re, shutil, struct, subprocess, sys, threading, time
 import shlex
 from pathlib import Path
 import tempfile
@@ -136,6 +136,8 @@ def find_adb() -> str:
 
 ADB = None
 SERIAL = None
+CURRENT_SESSION = None
+CURRENT_SCRIPT = None
 
 
 def sh(*args, timeout=60, check=False, binary=False):
@@ -169,8 +171,17 @@ def pick_device(preferred=None):
     out = sh("devices")
     lines = [l for l in out.splitlines()[1:] if "\tdevice" in l]
     if not lines:
+        # If Linux / Waydroid: try connecting Waydroid first
+        try:
+            from waydroid_helper import connect_waydroid
+            connect_waydroid(ADB)
+            out = sh("devices")
+            lines = [l for l in out.splitlines()[1:] if "\tdevice" in l]
+        except Exception:
+            pass
+    if not lines:
         # When no device is online, probe common emulator ADB ports.
-        for port in ("16384", "7555", "16416", "62001", "21503"):
+        for port in ("16384", "7555", "16416", "62001", "21503", "5555"):
             try:
                 sh("connect", f"127.0.0.1:{port}", timeout=10)
             except Exception:
@@ -181,7 +192,7 @@ def pick_device(preferred=None):
                 note(f"Connected to emulator at 127.0.0.1:{port}")
                 break
     if not lines:
-        sys.exit("❌ No Android device detected. Start MuMu, enable ADB debugging, or configure ADB_PATH.")
+        sys.exit("❌ No Android device detected. Start Waydroid or emulator, enable ADB debugging, or configure ADB_PATH.")
     online = [l.split("\t")[0] for l in lines]
     if preferred and preferred not in online:
         sys.exit(f"❌ ADB device {preferred} is not online. Available: {', '.join(online)}")
@@ -198,7 +209,37 @@ def pick_device(preferred=None):
     ok(f"Connected ADB device: {SERIAL}")
 
 
+def is_waydroid_target():
+    if sys.platform != "linux":
+        return False
+    if SERIAL and ("192.168.240." in str(SERIAL) or "waydroid" in str(SERIAL).lower()):
+        return True
+    try:
+        from waydroid_helper import get_waydroid_ip
+        w_ip = get_waydroid_ip()
+        if SERIAL and w_ip and w_ip in str(SERIAL):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def run_as_root(cmd_str, timeout=30):
+    if is_waydroid_target():
+        res = subprocess.run(["sudo", "waydroid", "shell"], input=cmd_str + "\n",
+                             capture_output=True, text=True, timeout=timeout)
+        return res.stdout.strip()
+    if "uid=0" in sh("shell", "id"):
+        return sh("shell", cmd_str, timeout=timeout)
+    return sh("shell", f"su -c '{cmd_str}'", timeout=timeout)
+
+
 def ensure_root():
+    if is_waydroid_target():
+        out = run_as_root("id", timeout=10)
+        if "uid=0" in out:
+            ok("Root verified (Waydroid privileged bridge)")
+            return
     def _id():
         try:
             return sh("shell", "id", timeout=15)
@@ -275,10 +316,13 @@ def ensure_frida_server():
         if remaining:
             for pid in remaining.split():
                 if pid.isdigit():
-                    sh("shell", f"su -c 'kill {pid}'")
+                    if is_waydroid_target():
+                        run_as_root(f"kill {pid}")
+                    else:
+                        sh("shell", f"su -c 'kill {pid}'")
             time.sleep(1)
         if sh("shell", "pidof frida-server || true").strip():
-            raise RuntimeError("Cannot stop old Frida server; restart MuMu and retry")
+            raise RuntimeError("Cannot stop old Frida server; restart emulator and retry")
     if deployed_version != FRIDA_REQUIRED:
         abi = sh("shell", "getprop ro.product.cpu.abi").strip()
         arch = {"arm64-v8a": "arm64", "armeabi-v7a": "arm", "armeabi": "arm",
@@ -297,7 +341,9 @@ def ensure_frida_server():
             output.write(source.read())
         sh("push", str(extracted), FRIDA_REMOTE, timeout=180, check=True)
         sh("shell", f"chmod 755 {FRIDA_REMOTE}", check=True)
-    if "uid=0" in sh("shell", "id"):
+    if is_waydroid_target():
+        run_as_root(f"{FRIDA_REMOTE} -D", timeout=15)
+    elif "uid=0" in sh("shell", "id"):
         sh("shell", f"nohup {FRIDA_REMOTE} -D >/dev/null 2>&1 &", timeout=15)
     else:
         sh("shell", f"su -c 'nohup {FRIDA_REMOTE} -D >/dev/null 2>&1 &'", timeout=15)
@@ -318,8 +364,12 @@ def read_purchase_token(sku_short: str, expected_account: str = "") -> str:
     # Unique paths prevent concurrent lookups from touching each other's files.
     remote = f"/data/local/tmp/lib_read_{os.getpid()}_{time.time_ns()}.db"
     try:
-        sh("shell", f"cp /data/data/{VENDING}/databases/library.db {remote} 2>/dev/null && chmod 666 {remote}",
-           timeout=30)
+        if is_waydroid_target():
+            run_as_root(f"cp /data/data/{VENDING}/databases/library.db {remote} && chmod 666 {remote}", timeout=30)
+        else:
+            sh("shell", f"su -c 'cp /data/data/{VENDING}/databases/library.db {remote} && chmod 666 {remote}' 2>/dev/null || "
+                        f"cp /data/data/{VENDING}/databases/library.db {remote} 2>/dev/null && chmod 666 {remote}",
+               timeout=30)
         with tempfile.TemporaryDirectory(prefix="google-ai-play-db-") as folder:
             local = Path(folder) / "library.db"
             try:
@@ -621,10 +671,25 @@ def current_play_account() -> str:
         warn("Cannot inspect Play Store UI. Open Play Store, tap the profile icon, and retry.")
         return ""
 
+    ns = nodes(xml)
+    for n in ns:
+        if n.get("desc") == "Navigate up" or n.get("text") in ("Not now", "Got it", "Dismiss", "Batal", "Tidak sekarang"):
+            tap(n["x"], n["y"])
+            time.sleep(2)
+            xml = ui_xml()
+            ns = nodes(xml)
+            break
+
+    for n in ns:
+        m = re.search(r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+)", n["desc"] + " " + n["text"])
+        if m:
+            return m.group(1).lower()
+
     opened_profile = False
-    for n in nodes(xml):
+    for n in ns:
         if ("\u8d26\u53f7\u548c\u8bbe\u7f6e" in n["desc"] or "Account and settings" in n["desc"]
-                or "T\u00e0i kho\u1ea3n v\u00e0 ch\u1ebf \u0111\u1ed9 c\u00e0i \u0111\u1eb7t" in n["desc"]):
+                or "T\u00e0i kho\u1ea3n v\u00e0 ch\u1ebf \u0111\u1ed9 c\u00e0i \u0111\u1eb7t" in n["desc"]
+                or "Google Account" in n["desc"]):
             tap(n["x"], n["y"])
             time.sleep(3)
             opened_profile = True
@@ -638,7 +703,12 @@ def current_play_account() -> str:
     if opened_profile:
         sh("shell", "input keyevent 4")
     if not best:
-        warn("Play account is not visible to UI automation; check the Play Store profile manually.")
+        dev_accounts = [re.search(r"name=([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+)", line) for line in accounts_on_device()]
+        matched = [m.group(1).lower() for m in dev_accounts if m]
+        if len(matched) == 1:
+            best = matched[0]
+        else:
+            warn("Play account is not visible to UI automation; check the Play Store profile manually.")
     return best
 
 
@@ -678,6 +748,7 @@ def launch_app() -> int:
         return 0
     sh("shell", f"am force-stop {PKG}")
     try:
+        sh("shell", f"am start -n {PKG}/.LauncherActivity 2>/dev/null", timeout=15)
         launch_output = sh("shell", f"monkey -p {PKG} -c android.intent.category.LAUNCHER 1", timeout=30)
     except subprocess.TimeoutExpired:
         warn("Google One launch (monkey) timed out; inspect the emulator screen.")
@@ -685,12 +756,13 @@ def launch_app() -> int:
     if "No activities found" in launch_output:
         warn("Google One has no launchable activity on this Android instance.")
         return 0
-    for seconds in (7, 3, 3, 3):
+    for seconds in (4, 4, 4, 5, 5, 5):
         time.sleep(seconds)
         pid = sh("shell", f"pidof {PKG}").strip()
-        if pid.isdigit():
-            return int(pid)
-    warn("Google One stopped or did not launch after 16 seconds. Open it manually in MuMu.")
+        pids = [p for p in pid.split() if p.isdigit()]
+        if pids:
+            return int(pids[0])
+    warn("Google One stopped or did not launch after 27 seconds. Open it manually.")
     warn(f"Diagnostics: adb shell pm path {PKG} ; adb shell monkey -p {PKG} -c android.intent.category.LAUNCHER 1")
     return 0
 
@@ -834,7 +906,26 @@ def run_trial(pid: int, wait=90, plan="auto", list_only=False, stack=False, old_
     sc = sess.create_script(build_js(plan, list_only, stack, old_token, stack_mode, activity_method))
     sc.on("message", on_msg)
     sc.load()
-    time.sleep(wait)
+    global CURRENT_SESSION, CURRENT_SCRIPT
+    CURRENT_SESSION = sess
+    CURRENT_SCRIPT = sc
+    deadline = time.time() + wait
+    last_offer_count = 0
+    stable_since = None
+    while time.time() < deadline:
+        if not list_only and res["launched"] is not None:
+            time.sleep(1)
+            break
+        if res.get("errors") and any(e.get("ev") in ("no_activity", "launch_err", "launch_outer_err", "boot_err") for e in res["errors"]):
+            break
+        if list_only and res.get("offers"):
+            count = len(res["offers"])
+            if count != last_offer_count:
+                last_offer_count = count
+                stable_since = time.time()
+            elif stable_since and (time.time() - stable_since) >= 2.0:
+                break
+        time.sleep(0.5)
     return res
 
 
@@ -921,14 +1012,16 @@ def assess_checkout_terms(text: str, expected_plan: str = "auto") -> dict:
     if "processing" in low and "subscribe" not in low:
         result["reason"] = "processing"
         return result
-    if not (any(x in low for x in ("subscribe", "\u8ba2\u9605", "đăng ký")) and
+    if not (any(x in low for x in ("subscribe", "langganan", "\u8ba2\u9605", "đăng ký")) and
             any(x in low for x in ("google ai", "google one", "ultra", "pro"))):
         return result
-    currency = r"(?:US\$|HK\$|NT\$|CA\$|AU\$|JP¥|¥|￥|\$|€|£|₫|VND\s*)"
+    currency = r"(?:US\$|HK\$|NT\$|CA\$|AU\$|JP¥|¥|￥|\$|€|£|₫|VND\s*|Rp\s*)"
     zero = currency + r"\s*0(?:[.,]0{1,2})?(?![\d.,])"
-    today = r"(?:today|due today|pay today|total today|charged today|\u4eca\u5929|\u4eca\u65e5|\u672c\u65e5|hôm nay)"
+    today = r"(?:today|due today|pay today|total today|charged today|starting\s*today|\u4eca\u5929|\u4eca\u65e5|\u672c\u65e5|hôm nay)"
     zero_today = bool(re.search(today + r"\s*[:：–-]?\s*" + zero, clean, re.I) or
-                      re.search(zero + r"\s*(?:due\s*)?" + today, clean, re.I))
+                      re.search(zero + r"\s*(?:due\s*)?" + today, clean, re.I) or
+                      re.search(r"starting\s*today\s*[:：–-]?\s*\d+[- ](?:month|year|day)s?\s*free\s*trial", clean, re.I) or
+                      re.search(r"you\s*won'?t\s*be\s*charged\s*if\s*you\s*cancel\s*before", clean, re.I))
     result["prices"] = re.findall(currency + r"\s*\d[\d,.]*", clean, re.I)[:8]
     if not zero_today:
         result["reason"] = "today_price_unverified"
@@ -936,9 +1029,9 @@ def assess_checkout_terms(text: str, expected_plan: str = "auto") -> dict:
     result["today_price"] = "0"
     patterns = {
         "pro12": r"(?:12\s*[- ]?\s*months?|1\s*[- ]?\s*year|one year|365\s*days|12\s*\u4e2a\s*\u6708|\u4e00\u5e74|12\s*\u304b\u6708)",
-        "pro6": r"(?:6\s*[- ]?\s*months?|6\s*\u4e2a\s*\u6708|\u534a\u5e74|6\s*\u304b\u6708)",
-        "pro6b": r"(?:6\s*[- ]?\s*months?|6\s*\u4e2a\s*\u6708|\u534a\u5e74|6\s*\u304b\u6708)",
-        "pro6c": r"(?:6\s*[- ]?\s*months?|6\s*\u4e2a\s*\u6708|\u534a\u5e74|6\s*\u304b\u6708)",
+        "pro6": r"(?:6\s*[- ]?\s*months?|6\s*\u4e2a\s*\u6708|\u534a\u5e74|6\s*\u304b\u6708|converted\s+from\s+the\s+remaining\s+time|54[0-9]\s*days)",
+        "pro6b": r"(?:6\s*[- ]?\s*months?|6\s*\u4e2a\s*\u6708|\u534a\u5e74|6\s*\u304b\u6708|converted\s+from\s+the\s+remaining\s+time|72[0-9]\s*days)",
+        "pro6c": r"(?:6\s*[- ]?\s*months?|6\s*\u4e2a\s*\u6708|\u534a\u5e74|6\s*\u304b\u6708|converted\s+from\s+the\s+remaining\s+time|91[0-9]\s*days)",
     }
     if not re.search(patterns.get(expected_plan, r"(?!x)x"), clean, re.I):
         result["reason"] = "trial_duration_unverified"
@@ -977,9 +1070,13 @@ def confirm_zero(wait=40, password="", expected_plan="auto") -> dict:
             warn("Google Play backup-payment prompt needs manual review; not enabling it automatically.")
             return out
         if reason == "zero_today_and_duration_verified":
-            if tap_text("\u8ba2\u9605", "Subscribe", "Đăng ký"):
+            if is_waydroid_target():
+                note("⚠️ Google Play pada Android memproteksi tombol pembayaran dari klik sintetis.")
+                note("👉 SILAKAN KLIK TOMBOL 'Subscribe' / 'Langganan' DI JENDELA WAYDROID SEKARANG!")
+            if tap_text("\u8ba2\u9605", "Subscribe", "Đăng ký", "Langganan"):
                 out["confirmed"] = True
                 ok("Tapped Subscribe after verifying today's zero total and expected trial period.")
+                time.sleep(3)
             else:
                 out["reason"] = "subscribe_button_not_found"
                 warn("Subscribe control not found; no transaction confirmed.")
@@ -1077,6 +1174,13 @@ def process(email, password="", totp_secret="", add=True, card=None, plan="auto"
         # Preserve the original checkout screen if amount or offer terms
         # are ambiguous; never navigate away before the user can inspect it.
         if rec["sheet"].get("confirmed"):
+            step("Waiting for subscription completion in Google Play...")
+            max_wait = 60 if is_waydroid_target() else 3
+            for _ in range(max_wait):
+                if read_purchase_token("subs_variant", expected_account=email):
+                    ok("Subscription confirmed in Google Play library!")
+                    break
+                time.sleep(2)
             rec["subscription_page"] = verify()
         else:
             note("Checkout not confirmed; Google Play remains open for inspection.")
@@ -1090,6 +1194,19 @@ def process(email, password="", totp_secret="", add=True, card=None, plan="auto"
     else:
         rec["status"], rec["error"] = diagnose_launch_failure(fr)
         warn(f"Checkout not opened: {rec['status']}: {rec['error']}")
+    global CURRENT_SESSION, CURRENT_SCRIPT
+    try:
+        if CURRENT_SCRIPT:
+            CURRENT_SCRIPT.unload()
+    except Exception:
+        pass
+    try:
+        if CURRENT_SESSION:
+            CURRENT_SESSION.detach()
+    except Exception:
+        pass
+    CURRENT_SESSION = None
+    CURRENT_SCRIPT = None
     return rec
 
 

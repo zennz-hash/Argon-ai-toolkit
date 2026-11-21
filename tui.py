@@ -63,6 +63,14 @@ def is_macos_platform() -> bool:
     return sys.platform == "darwin"
 
 
+def is_linux_platform() -> bool:
+    return sys.platform == "linux"
+
+
+def is_posix_platform() -> bool:
+    return sys.platform in ("darwin", "linux")
+
+
 class GoogleAITUI(App[None]):
     TITLE = "ePlus AI Toolkit"
     SUB_TITLE = "ePlus.DEV"
@@ -191,6 +199,8 @@ class GoogleAITUI(App[None]):
         self.repo = repo.resolve()
         self.initial_step = validate_step(selected_step)
         self.macos_mode = is_macos_platform()
+        self.linux_mode = is_linux_platform()
+        self.posix_mode = is_posix_platform()
         self.start_sequence = start_sequence
         self.debug_visible = initial_debug
         self.busy = False
@@ -312,7 +322,15 @@ class GoogleAITUI(App[None]):
 
     def on_mount(self) -> None:
         self.set_interval(1, self._refresh_elapsed)
-        if self.macos_mode:
+        if self.linux_mode:
+            self.query_one("#device", Static).update("ANDROID DEVICE\nWaydroid • Auto-detect")
+            self.query_one("#quick_hint", Static).update(
+                "Check Waydroid and Google AI offers before any subscription step."
+            )
+            self.query_one("#read_only", Static).update(
+                "Steps 2–5 can charge money. Confirm account, future price and renewal date."
+            )
+        elif self.macos_mode:
             self.query_one("#device", Static).update("ANDROID DEVICE\nADB • Auto-detect")
             self.query_one("#quick_hint", Static).update(
                 "Check Android and Google AI offers before any subscription step."
@@ -371,13 +389,16 @@ class GoogleAITUI(App[None]):
         if not self.busy or self._started_at is None:
             return
         elapsed = int(time.monotonic() - self._started_at)
-        self.query_one("#elapsed", Static).update(f"Elapsed: {elapsed // 60:02d}:{elapsed % 60:02d}")
-        if self._last_activity_at is not None:
-            idle = int(time.monotonic() - self._last_activity_at)
-            if idle >= 30:
-                self.query_one("#activity", Static).update(
-                    f"No new output for {idle}s. Check MuMu or technical details."
-                )
+        try:
+            self.query_one("#elapsed", Static).update(f"Elapsed: {elapsed // 60:02d}:{elapsed % 60:02d}")
+            if self._last_activity_at is not None:
+                idle = int(time.monotonic() - self._last_activity_at)
+                if idle >= 30:
+                    self.query_one("#activity", Static).update(
+                        f"No new output for {idle}s. Check MuMu or technical details."
+                    )
+        except Exception:
+            pass
 
     def _set_workflow(self, step: int, state: str) -> None:
         marker = {"running": "●", "done": "✓", "review": "!"}.get(state, "○")
@@ -572,20 +593,22 @@ class GoogleAITUI(App[None]):
         self._last_output.clear()
         self._run_output.clear()
         self.query_one("#debug_log", RichLog).clear()
-        self.query_one("#device", Static).update(
-            "ANDROID DEVICE\nADB • Auto-detect" if self.macos_mode
-            else "ANDROID DEVICE\nMuMu • Auto-detect"
+        device_label = (
+            "ANDROID DEVICE\nWaydroid • Auto-detect" if self.linux_mode
+            else ("ANDROID DEVICE\nADB • Auto-detect" if self.macos_mode else "ANDROID DEVICE\nMuMu • Auto-detect")
         )
+        self.query_one("#device", Static).update(device_label)
         self.query_one("#account", Static).update("GOOGLE ACCOUNT\nNot checked")
         self.query_one("#manual", Button).display = False
         self.query_one("#manual", Button).disabled = True
         self._started_at = time.monotonic()
         self._last_activity_at = self._started_at
         self.query_one("#elapsed", Static).update("Elapsed: 00:00")
-        self.query_one("#activity", Static).update(
-            "Connecting to Android diagnostics..." if self.macos_mode
-            else "Connecting to MuMu and preparing tools..."
+        activity_label = (
+            "Connecting to Waydroid / Android diagnostics..." if self.linux_mode
+            else ("Connecting to Android diagnostics..." if self.macos_mode else "Connecting to MuMu and preparing tools...")
         )
+        self.query_one("#activity", Static).update(activity_label)
         self.query_one("#quickstart", Button).disabled = True
         self.query_one("#run", Button).disabled = True
         self.query_one("#sequence", Button).disabled = True
@@ -598,10 +621,11 @@ class GoogleAITUI(App[None]):
         self.query_one("#next", Button).display = False
         self.query_one("#step_result", Static).update(f"Step {step} · {STAGES[step].label}")
         self._set_workflow(step, "running")
-        self._set_status(
-            "Running — check Android if prompted" if self.macos_mode
-            else "Running — check MuMu if prompted"
+        status_label = (
+            "Running — check Waydroid if prompted" if self.linux_mode
+            else ("Running — check Android if prompted" if self.macos_mode else "Running — check MuMu if prompted")
         )
+        self._set_status(status_label)
         self._set_message("Preparing tools and checking Google Play. Missing dependencies are installed automatically.")
         self.run_stage(step)
 
@@ -633,7 +657,7 @@ class GoogleAITUI(App[None]):
     @work(thread=True, exclusive=True)
     def run_stage(self, step: int) -> None:
         try:
-            if not self.macos_mode and needs_setup():
+            if not self.posix_mode and needs_setup():
                 self.call_from_thread(self._set_status, "Setting up...")
                 self.call_from_thread(self._set_message,
                                       "Preparing Frida and ADB. You do not need a separate setup command.")
@@ -750,7 +774,7 @@ class GoogleAITUI(App[None]):
         self._set_message(instruction)
         if step == 1:
             self.query_one("#step_result", Static).update(report_summary(report))
-            if self.macos_mode and isinstance(report, dict):
+            if self.posix_mode and isinstance(report, dict):
                 detected = report.get("detected_play_account")
                 if isinstance(detected, str) and detected:
                     self.query_one("#account", Static).update(

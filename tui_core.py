@@ -115,10 +115,13 @@ def validate_step(step: int) -> int:
 
 def command_for_step(step: int, repo: Path, shell: str | None = None) -> list[str]:
     validate_step(step)
-    if sys.platform == "darwin":
-        bridge = repo / "macos_runner.py"
+    if shell is None and sys.platform in ("linux", "darwin"):
+        runner_name = "linux_runner.py" if sys.platform == "linux" else "macos_runner.py"
+        bridge = repo / runner_name
+        if not bridge.is_file() and sys.platform == "linux":
+            bridge = repo / "macos_runner.py"
         if not bridge.is_file():
-            raise FileNotFoundError("macos_runner.py is missing")
+            raise FileNotFoundError(f"{runner_name} is missing")
         command = [sys.executable, str(bridge), "--step", str(step)]
         # The Textual app shows a separate approval modal for each paid stage.
         # The native adapter requires explicit flags as a second fail-closed gate.

@@ -158,10 +158,12 @@ def find_adb() -> str:
     step("Locating ADB")
     candidates = [
         os.environ.get("ADB_PATH", ""),
+        shutil.which("adb") or "",
+        "/usr/bin/adb",
+        "/usr/local/bin/adb",
         str(BASE / "platform-tools" / "adb.exe"),
         str(user_platform_tools() / "adb.exe"),
         *ADB_CANDIDATES,
-        shutil.which("adb") or "",
     ]
     for candidate in candidates:
         if candidate and adb_is_working(candidate):
@@ -176,14 +178,21 @@ def connect_emulator(adb):
     step("Connecting to the emulator")
     devices = online_serials(adb)
     if not devices:
-        for port in ("16384", "7555", "16416", "21503", "62001"):
+        try:
+            from waydroid_helper import connect_waydroid
+            connect_waydroid(adb)
+            devices = online_serials(adb)
+        except Exception:
+            pass
+    if not devices:
+        for port in ("16384", "7555", "16416", "21503", "62001", "5555"):
             subprocess.run([adb, "connect", f"127.0.0.1:{port}"],
                            capture_output=True, text=True, errors="replace", timeout=10)
             devices = online_serials(adb)
             if devices:
                 break
     if not devices:
-        warn("No online Android device. Start MuMu and enable ADB debugging.")
+        warn("No online Android device. Start Waydroid or emulator, and enable ADB debugging.")
         return None
     selected = auto_select_device(adb, serials=devices)
     if not selected:

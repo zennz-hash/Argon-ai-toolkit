@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SKIP_DIRS = {".git", "__pycache__", "node_modules", "ultra0-report"}
+SKIP_DIRS = {".git", "__pycache__", "node_modules", "ultra0-report", ".venv", "venv"}
 EXTS = {".py", ".js", ".mjs", ".ps1", ".bat", ".md", ".txt", ".yml", ".yaml"}
 SCRIPT_RANGES = ((0x3400, 0x9FFF), (0x3040, 0x30FF), (0xAC00, 0xD7AF))
 LOCALIZED_READMES = {f"README.{locale}.md" for locale in ("vi", "zh-CN", "ja", "ko", "es", "fr")}
