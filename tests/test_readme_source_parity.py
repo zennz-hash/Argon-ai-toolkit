@@ -20,7 +20,8 @@ TECHNICAL = (
 
 class ReadmeSourceParityTests(unittest.TestCase):
     def test_all_locales_track_exact_source_blob(self):
-        source = (ROOT / "README.md").read_bytes()
+        source_path = (ROOT / "README.canonical.md") if (ROOT / "README.canonical.md").is_file() else (ROOT / "README.md")
+        source = source_path.read_bytes()
         payload = ("blob " + str(len(source)) + "\0").encode("ascii") + source
         sha = hashlib.sha1(payload).hexdigest()
         for locale in LOCALES:
@@ -32,7 +33,8 @@ class ReadmeSourceParityTests(unittest.TestCase):
                 )
 
     def test_full_major_section_and_technical_coverage(self):
-        english = (ROOT / "README.md").read_text(encoding="utf-8")
+        source_file = (ROOT / "README.canonical.md") if (ROOT / "README.canonical.md").is_file() else (ROOT / "README.md")
+        english = source_file.read_text(encoding="utf-8")
         expected_count = len(re.findall(r"^## ", english, re.MULTILINE))
         self.assertGreaterEqual(expected_count, 10)
         for locale in LOCALES:
@@ -63,7 +65,8 @@ class ReadmeSourceParityTests(unittest.TestCase):
 
     def test_localized_screenshot_matches_canonical_readme(self):
         """Keep the screenshot shown in all translated READMEs in sync with English."""
-        english = (ROOT / "README.md").read_text(encoding="utf-8")
+        source_file = (ROOT / "README.canonical.md") if (ROOT / "README.canonical.md").is_file() else (ROOT / "README.md")
+        english = source_file.read_text(encoding="utf-8")
         image_urls = re.findall(
             r"https://github[.]com/user-attachments/assets/[0-9a-f-]+",
             english,
@@ -83,7 +86,8 @@ class ReadmeSourceParityTests(unittest.TestCase):
 
     def test_three_separate_one_dollar_transactions_documented(self):
         """Do not regress to calling three $1 events a single $3 charge."""
-        english = (ROOT / "README.md").read_text(encoding="utf-8")
+        source_file = (ROOT / "README.canonical.md") if (ROOT / "README.canonical.md").is_file() else (ROOT / "README.md")
+        english = source_file.read_text(encoding="utf-8")
         self.assertIn("three separate US$1 transactions", english)
         self.assertNotIn("hold of around US$3", english)
         for locale in LOCALES:

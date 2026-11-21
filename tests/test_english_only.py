@@ -40,8 +40,8 @@ class EnglishOnlyTest(unittest.TestCase):
             ):
                 continue  # Intentionally translated overviews and detailed guides.
             content = file.read_text(encoding="utf-8")
-            if file.parent == ROOT and file.name == "README.md":
-                # Allow native-language names only in the English README switcher.
+            if (file.parent == ROOT and file.name in ("README.md", "README.en.md", "README.canonical.md")) or file == ROOT / "docs" / "README.en.md":
+                # Allow native-language names only in the language switcher.
                 content = "\n".join(line for line in content.splitlines()
                                     if not line.startswith("**Languages:**"))
             if has_non_english_script(content):

@@ -18,7 +18,8 @@ MD_LINK = re.compile(r"(?<!!)\[[^]]+\]\(([^)]+)\)")
 
 class DocumentationNavigationTests(unittest.TestCase):
     def test_original_full_readme_structure_and_translations(self):
-        english = (ROOT / "README.md").read_text(encoding="utf-8")
+        source_file = (ROOT / "README.canonical.md") if (ROOT / "README.canonical.md").is_file() else (ROOT / "README.md")
+        english = source_file.read_text(encoding="utf-8")
         self.assertGreater(len(english), 12000)
         for heading in ("## Disclaimer", "## Install and prepare",
                         "## macOS", "## Use the dashboard (recommended)",
@@ -68,7 +69,8 @@ class DocumentationNavigationTests(unittest.TestCase):
                     self.assertTrue((source.parent / relative).is_file())
 
     def test_windows_and_mac_installation_both_work_from_project_root(self):
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        canonical = (ROOT / "README.canonical.md") if (ROOT / "README.canonical.md").is_file() else (ROOT / "README.md")
+        readme = canonical.read_text(encoding="utf-8")
         self.assertIn("### Windows requirements", readme)
         self.assertIn("## macOS — Install and run", readme)
         self.assertEqual(readme.count("git clone https://github.com/hoangsvit/google-ai.git"), 2)
@@ -111,7 +113,8 @@ class DocumentationNavigationTests(unittest.TestCase):
         self.assertIn("run-all.ps1", project)
 
     def test_restored_readme_retains_detailed_commands_and_links(self):
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        canonical = (ROOT / "README.canonical.md") if (ROOT / "README.canonical.md").is_file() else (ROOT / "README.md")
+        readme = canonical.read_text(encoding="utf-8")
         self.assertIn("(docs/README.md)", readme)
         self.assertIn("(docs/SAFETY.md)", readme)
         self.assertIn("(docs/USAGE.md)", readme)
@@ -122,7 +125,8 @@ class DocumentationNavigationTests(unittest.TestCase):
         self.assertNotIn("git switch dev", readme)
 
     def test_shell_commands_and_setup_requirements_are_platform_specific(self):
-        overview = (ROOT / "README.md").read_text(encoding="utf-8")
+        canonical = (ROOT / "README.canonical.md") if (ROOT / "README.canonical.md").is_file() else (ROOT / "README.md")
+        overview = canonical.read_text(encoding="utf-8")
         hub = (DOCS / "README.md").read_text(encoding="utf-8")
         mac_guide = (DOCS / "MACOS-PREVIEW.md").read_text(encoding="utf-8")
         win_guide = (DOCS / "INSTALLATION.md").read_text(encoding="utf-8")
@@ -136,7 +140,8 @@ class DocumentationNavigationTests(unittest.TestCase):
         self.assertIn("adb devices", mac_guide)
         self.assertIn("This guide is for Windows only", win_guide)
 
-        for path in ("README.md", "README.vi.md", "README.es.md",
+        first_readme = "README.canonical.md" if (ROOT / "README.canonical.md").is_file() else "README.md"
+        for path in (first_readme, "README.vi.md", "README.es.md",
                      "README.fr.md", "README.ja.md", "README.ko.md",
                      "README.zh-CN.md"):
             with self.subTest(readme=path):
