@@ -748,7 +748,7 @@ def launch_app() -> int:
         return 0
     sh("shell", f"am force-stop {PKG}")
     try:
-        sh("shell", f"am start -n {PKG}/.LauncherActivity 2>/dev/null", timeout=15)
+        sh("shell", f"am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n {PKG}/.LauncherActivity 2>/dev/null", timeout=15)
         launch_output = sh("shell", f"monkey -p {PKG} -c android.intent.category.LAUNCHER 1", timeout=30)
     except subprocess.TimeoutExpired:
         warn("Google One launch (monkey) timed out; inspect the emulator screen.")
@@ -767,7 +767,11 @@ def launch_app() -> int:
     return 0
 
 
-def build_js(plan: str = "auto", list_only: bool = False, stack: bool = False, old_token: str = "", stack_mode=None, activity_method="auto") -> str:
+CUSTOM_SKU_RE = re.compile(r"^g1\.[A-Za-z0-9._-]{2,120}$")
+CUSTOM_OFFER_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
+
+
+def build_js(plan: str = "auto", list_only: bool = False, stack: bool = False, old_token: str = "", stack_mode=None, activity_method="auto", custom_product: str = "", custom_offer: str = "") -> str:
     """Build the product query for the requested Google Play plan."""
     if activity_method not in ("auto", "choose", "thread"):
         raise ValueError(f"Unsupported activity method: {activity_method}")
@@ -781,12 +785,30 @@ def build_js(plan: str = "auto", list_only: bool = False, stack: bool = False, o
         js = js.replace('var PREFER="";', 'var PREFER=""; var OLD_TOKEN="%s";' % old_token, 1)
     if stack_mode is not None:
         js = js.replace('var PREFER="";', 'var PREFER=""; var STACK_MODE=%d;' % stack_mode, 1)
+    if custom_product:
+        clean_prod = custom_product.strip()
+        if not CUSTOM_SKU_RE.fullmatch(clean_prod):
+            raise ValueError(f"Invalid Google One product ID: {custom_product!r}")
+        clean_offer = custom_offer.strip()
+        if clean_offer:
+            if clean_offer.lower() == "null" or not CUSTOM_OFFER_RE.fullmatch(clean_offer):
+                raise ValueError(f"Invalid Google Play offer ID: {custom_offer!r}")
+        js = js.replace('var PRODUCTS=["g1.play.20tb","g1.play.ai.pro","g1.30tb"];',
+                        f"var PRODUCTS={json.dumps([clean_prod])};")
+        if clean_offer:
+            js = js.replace('var PREFER="";', f"var PREFER={json.dumps(clean_offer)};", 1)
+        return js
     if plan == "20x":
         js = js.replace('var PRODUCTS=["g1.play.20tb","g1.play.ai.pro","g1.30tb"];',
                         'var PRODUCTS=["g1.play.ai.pro","g1.ai.pro","g1.30tb"];')
     elif plan == "5x":
         js = js.replace('var PRODUCTS=["g1.play.20tb","g1.play.ai.pro","g1.30tb"];',
                         'var PRODUCTS=["g1.play.20tb"];')
+    elif plan == "pro18":
+        # Google AI Pro 5TB 18-month introductory offer (g1.2tb.ai.18months_eft / eft-18months)
+        js = js.replace('var PRODUCTS=["g1.play.20tb","g1.play.ai.pro","g1.30tb"];',
+                        'var PRODUCTS=["g1.2tb.ai.18months_eft"];')
+        js = js.replace('var PREFER="";', 'var PREFER="eft-18months";', 1)
     elif plan.startswith("pro"):
         # Google AI Pro 5TB（g1.2tb.ai.subs_variant）：12months-eft / 6months-eft / 6months-eft-2 / 6months-eft-ss-2026
         prefer = {"pro12": "12months-eft", "pro6": "6months-eft",
@@ -871,7 +893,7 @@ def get_target_frida_device(pid: int, serial: str):
     return selected
 
 
-def run_trial(pid: int, wait=90, plan="auto", list_only=False, stack=False, old_token="", stack_mode=None, activity_method="auto") -> dict:
+def run_trial(pid: int, wait=90, plan="auto", list_only=False, stack=False, old_token="", stack_mode=None, activity_method="auto", custom_product="", custom_offer="") -> dict:
     step("Injecting billing module to inspect introductory offers")
     dev = get_target_frida_device(pid, SERIAL)
     note(f"Using Frida device: {dev.id} (ADB: {SERIAL})")
@@ -903,7 +925,8 @@ def run_trial(pid: int, wait=90, plan="auto", list_only=False, stack=False, old_
         elif ev and ("err" in ev or ev.startswith("no_")):
             res["errors"].append(p)
 
-    sc = sess.create_script(build_js(plan, list_only, stack, old_token, stack_mode, activity_method))
+    sc = sess.create_script(build_js(plan, list_only, stack, old_token, stack_mode, activity_method,
+                                     custom_product=custom_product, custom_offer=custom_offer))
     sc.on("message", on_msg)
     sc.load()
     global CURRENT_SESSION, CURRENT_SCRIPT
@@ -1013,26 +1036,32 @@ def assess_checkout_terms(text: str, expected_plan: str = "auto") -> dict:
         result["reason"] = "processing"
         return result
     if not (any(x in low for x in ("subscribe", "langganan", "\u8ba2\u9605", "đăng ký")) and
-            any(x in low for x in ("google ai", "google one", "ultra", "pro"))):
+            any(x in low for x in ("google ai", "google one", "ultra", "pro", "100 gb", "200 gb", "30 gb", "400 gb", "2 tb", "5 tb", "20 tb", "30 tb"))):
         return result
     currency = r"(?:US\$|HK\$|NT\$|CA\$|AU\$|JP¥|¥|￥|\$|€|£|₫|VND\s*|Rp\s*)"
     zero = currency + r"\s*0(?:[.,]0{1,2})?(?![\d.,])"
-    today = r"(?:today|due today|pay today|total today|charged today|starting\s*today|\u4eca\u5929|\u4eca\u65e5|\u672c\u65e5|hôm nay)"
+    today = r"(?:today|due today|pay today|total today|charged today|starting\s*today|mulai\s*hari\s*ini|hari\s*ini|\u4eca\u5929|\u4eca\u65e5|\u672c\u65e5|hôm nay)"
     zero_today = bool(re.search(today + r"\s*[:：–-]?\s*" + zero, clean, re.I) or
                       re.search(zero + r"\s*(?:due\s*)?" + today, clean, re.I) or
                       re.search(r"starting\s*today\s*[:：–-]?\s*\d+[- ](?:month|year|day)s?\s*free\s*trial", clean, re.I) or
-                      re.search(r"you\s*won'?t\s*be\s*charged\s*if\s*you\s*cancel\s*before", clean, re.I))
+                      re.search(r"mulai\s*hari\s*ini\s*[:：–-]?\s*(?:uji\s*coba\s*gratis\s*\d+\s*(?:bulan|tahun|hari)|\d+\s*(?:bulan|tahun|hari)\s*(?:uji\s*coba\s*)?gratis)", clean, re.I) or
+                      re.search(r"you\s*won'?t\s*be\s*charged\s*if\s*you\s*cancel\s*before", clean, re.I) or
+                      re.search(r"tidak\s*akan\s*dikenakan\s*biaya\s*jika\s*(?:anda\s*)?membatalkan\s*sebelum", clean, re.I))
     result["prices"] = re.findall(currency + r"\s*\d[\d,.]*", clean, re.I)[:8]
     if not zero_today:
         result["reason"] = "today_price_unverified"
         return result
     result["today_price"] = "0"
     patterns = {
-        "pro12": r"(?:12\s*[- ]?\s*months?|1\s*[- ]?\s*year|one year|365\s*days|12\s*\u4e2a\s*\u6708|\u4e00\u5e74|12\s*\u304b\u6708)",
-        "pro6": r"(?:6\s*[- ]?\s*months?|6\s*\u4e2a\s*\u6708|\u534a\u5e74|6\s*\u304b\u6708|converted\s+from\s+the\s+remaining\s+time|54[0-9]\s*days)",
-        "pro6b": r"(?:6\s*[- ]?\s*months?|6\s*\u4e2a\s*\u6708|\u534a\u5e74|6\s*\u304b\u6708|converted\s+from\s+the\s+remaining\s+time|72[0-9]\s*days)",
-        "pro6c": r"(?:6\s*[- ]?\s*months?|6\s*\u4e2a\s*\u6708|\u534a\u5e74|6\s*\u304b\u6708|converted\s+from\s+the\s+remaining\s+time|91[0-9]\s*days)",
+        "pro18": r"(?:18\s*[- ]?\s*months?|18\s*bulan|18\s*\u4e2a\s*\u6708|18\s*\u304b\u6708|18\s*tháng|54[0-9]\s*days)",
+        "pro12": r"(?:12\s*[- ]?\s*months?|12\s*bulan|1\s*[- ]?\s*year|one year|365\s*days|12\s*\u4e2a\s*\u6708|\u4e00\u5e74|12\s*\u304b\u6708)",
+        "pro6": r"(?:6\s*[- ]?\s*months?|6\s*bulan|6\s*\u4e2a\s*\u6708|\u534a\u5e74|6\s*\u304b\u6708|converted\s+from\s+the\s+remaining\s+time|54[0-9]\s*days)",
+        "pro6b": r"(?:6\s*[- ]?\s*months?|6\s*bulan|6\s*\u4e2a\s*\u6708|\u534a\u5e74|6\s*\u304b\u6708|converted\s+from\s+the\s+remaining\s+time|72[0-9]\s*days)",
+        "pro6c": r"(?:6\s*[- ]?\s*months?|6\s*bulan|6\s*\u4e2a\s*\u6708|\u534a\u5e74|6\s*\u304b\u6708|converted\s+from\s+the\s+remaining\s+time|91[0-9]\s*days)",
     }
+    if expected_plan == "custom":
+        result["reason"] = "zero_today_manual_review"
+        return result
     if not re.search(patterns.get(expected_plan, r"(?!x)x"), clean, re.I):
         result["reason"] = "trial_duration_unverified"
         return result
@@ -1040,7 +1069,7 @@ def assess_checkout_terms(text: str, expected_plan: str = "auto") -> dict:
     return result
 
 
-def confirm_zero(wait=40, password="", expected_plan="auto") -> dict:
+def confirm_zero(wait=40, password="", expected_plan="auto", no_tap: bool = False) -> dict:
     step("Checking today's Google Play checkout total and trial duration")
     out = {"price": None, "confirmed": False, "ineligible": False,
            "text": "", "reason": "checkout_not_visible"}
@@ -1069,7 +1098,15 @@ def confirm_zero(wait=40, password="", expected_plan="auto") -> dict:
         if reason == "backup_payment_methods_prompt":
             warn("Google Play backup-payment prompt needs manual review; not enabling it automatically.")
             return out
+        if reason == "zero_today_manual_review":
+            out["reason"] = "awaiting_manual_confirmation"
+            ok("Verified today's zero total for custom catalog offer; leaving Google Play checkout open for manual review.")
+            return out
         if reason == "zero_today_and_duration_verified":
+            if no_tap:
+                out["reason"] = "awaiting_manual_confirmation"
+                ok("Verified today's zero total and expected trial period; leaving Google Play checkout open for manual confirmation (--no-tap).")
+                return out
             if is_waydroid_target():
                 note("⚠️ Google Play pada Android memproteksi tombol pembayaran dari klik sintetis.")
                 note("👉 SILAKAN KLIK TOMBOL 'Subscribe' / 'Langganan' DI JENDELA WAYDROID SEKARANG!")
@@ -1102,7 +1139,7 @@ def verify() -> str:
 
 
 # ---------- Per-account workflow ----------
-def process(email, password="", totp_secret="", add=True, card=None, plan="auto", no_switch=False, list_only=False, stack=False, old_token="", stack_mode=None, activity_method="auto") -> dict:
+def process(email, password="", totp_secret="", add=True, card=None, plan="auto", no_switch=False, list_only=False, stack=False, old_token="", stack_mode=None, activity_method="auto", no_tap=False, custom_product="", custom_offer="") -> dict:
     print("\n" + "=" * 56)
     print(f"  Processing account: {email}")
     print("=" * 56)
@@ -1162,7 +1199,8 @@ def process(email, password="", totp_secret="", add=True, card=None, plan="auto"
         rec["status"] = "app_not_started"
         return rec
     fr = run_trial(pid, plan=plan, list_only=list_only, stack=stack, old_token=old_token,
-                   stack_mode=stack_mode, activity_method=activity_method)
+                   stack_mode=stack_mode, activity_method=activity_method,
+                   custom_product=custom_product, custom_offer=custom_offer)
     rec.update(fr)
     if list_only:
         rec["status"] = "listed" if fr.get("offers") else "offer_query_failed"
@@ -1170,7 +1208,9 @@ def process(email, password="", totp_secret="", add=True, card=None, plan="auto"
             rec["error"] = "No offer data returned; inspect BillingClient and Frida errors."
         return rec
     if fr["launched"] and fr["launched"].get("code") == 0:
-        rec["sheet"] = confirm_zero(password=password, expected_plan=plan)
+        effective_plan = "custom" if custom_product else plan
+        effective_no_tap = True if custom_product else no_tap
+        rec["sheet"] = confirm_zero(password=password, expected_plan=effective_plan, no_tap=effective_no_tap)
         # Preserve the original checkout screen if amount or offer terms
         # are ambiguous; never navigate away before the user can inspect it.
         if rec["sheet"].get("confirmed"):
@@ -1277,8 +1317,14 @@ def main():
     ap.add_argument("--no-add", action="store_true", help="Do not add the account to Android")
     ap.add_argument("--no-switch", action="store_true",
                     help="Verify the current Google Play account without switching automatically")
-    ap.add_argument("--plan", default="auto", choices=["auto", "5x", "20x", "pro12", "pro6", "pro6b", "pro6c"],
-                    help="auto=query available products; 5x=Ultra 20TB; 20x=Ultra 30TB")
+    ap.add_argument("--no-tap", action="store_true",
+                    help="Open and inspect Google Play checkout without tapping Subscribe")
+    ap.add_argument("--product", default="",
+                    help="Exact Google One SKU ID (e.g. g1.2tb.ai.2months_eft); always requires manual review")
+    ap.add_argument("--offer", default="",
+                    help="Exact zero-priced introductory offer ID to match with --product")
+    ap.add_argument("--plan", default="auto", choices=["auto", "5x", "20x", "pro18", "pro12", "pro6", "pro6b", "pro6c"],
+                    help="auto=query available products; 5x=Ultra 20TB; 20x=Ultra 30TB; pro18=Pro 5TB 18m")
     a = ap.parse_args()
 
     ADB = find_adb()
@@ -1315,7 +1361,8 @@ def main():
         try:
             rec = process(email, pw, sec, add=(not a.no_add and not a.list), card=card, plan=a.plan,
                           no_switch=a.no_switch, list_only=a.list, stack=a.stack, old_token=a.old_token,
-                          stack_mode=a.mode, activity_method=a.activity_method)
+                          stack_mode=a.mode, activity_method=a.activity_method, no_tap=a.no_tap,
+                          custom_product=a.product, custom_offer=a.offer)
         except Exception as e:
             warn(f"{type(e).__name__}: {str(e)[:320]}")
             rec = {"email": email, "status": "exception", "error": str(e)[:320],

@@ -7,7 +7,7 @@ function L(v){ Java.classFactory.loader=v; }
 function S(o){ send(o); }
 
 function periodRank(p){
-  var m={"P1Y":12,"P12M":12,"P6M":6,"P3M":3,"P1M":1};
+  var m={"P1Y6M":18,"P18M":18,"P1Y3M":15,"P15M":15,"P1Y":12,"P12M":12,"P52W1D":12,"P9M":9,"P6M":6,"P26W2D":6,"P180D":6,"P4M":4,"P3M":3,"P13W1D":3,"P2M":2,"P8W6D":2,"P1M":1,"P4W3D":1};
   return m[String(p)]||0;
 }
 function activityUsable(activity) {

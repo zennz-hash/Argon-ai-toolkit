@@ -207,7 +207,7 @@ class GoogleAITUI(App[None]):
         self.sequence = False
         self.current_step: int | None = None
         self._child: subprocess.Popen[str] | None = None
-        self._last_output: deque[str] = deque(maxlen=350)
+        self._last_output: deque[str] = deque(maxlen=1000)
         self._run_output: deque[str] = deque(maxlen=35)
         self._stop_after_step = False
         self._cancel_requested = False
@@ -218,6 +218,8 @@ class GoogleAITUI(App[None]):
         self._last_activity_at: float | None = None
         self.advanced_visible = False
         self._last_mode = "single"
+        self._readonly_scan = False
+        self._scan_summary = ""
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -243,6 +245,7 @@ class GoogleAITUI(App[None]):
                         for stage in STAGES:
                             yield Static(f"○  {stage.number}. {stage.label}",
                                          id=f"stage_{stage.number}", classes="workflow-step")
+                    yield Button("All Offers (130+ SKUs)", id="all_offers")
                     yield Button("Help & Guide", id="nav_help")
                     yield Button("Show technical details", id="debug")
                     yield Button("Exit toolkit", id="exit")
@@ -490,11 +493,56 @@ class GoogleAITUI(App[None]):
             return
         self._confirm_stage(next_step, True, previous_verified=True)
 
+    def _is_readonly_active(self) -> bool:
+        return self._readonly_scan or self.current_step in (0, 1)
+
+    @on(Button.Pressed, "#all_offers")
+    def all_offers_pressed(self) -> None:
+        if self.busy:
+            return
+        self.busy = True
+        self.sequence = False
+        self.current_step = None
+        self._readonly_scan = True
+        self._scan_summary = ""
+        self._stop_after_step = False
+        self._cancel_requested = False
+        self._exit_after_step = False
+        self._last_outcome = None
+        self._last_output.clear()
+        self._run_output.clear()
+        log = self.query_one("#debug_log", RichLog)
+        log.clear()
+        self.debug_visible = True
+        log.display = True
+        self.query_one("#debug", Button).label = "Hide technical details"
+        self.query_one("#manual", Button).display = False
+        self.query_one("#manual", Button).disabled = True
+        self._started_at = time.monotonic()
+        self._last_activity_at = self._started_at
+        self.query_one("#elapsed", Static).update("Elapsed: 00:00")
+        self.query_one("#activity", Static).update("Querying all Google One SKU offers (read-only)...")
+        self.query_one("#quickstart", Button).disabled = True
+        self.query_one("#all_offers", Button).disabled = True
+        self.query_one("#run", Button).disabled = True
+        self.query_one("#sequence", Button).disabled = True
+        self.query_one("#mode", Select).disabled = True
+        self.query_one("#step", Select).disabled = True
+        self.query_one("#next", Button).disabled = True
+        self.query_one("#next", Button).display = False
+        self.query_one("#stop", Button).disabled = False
+        self.query_one("#stop", Button).label = "Stop check"
+        self.query_one("#stop", Button).display = True
+        self.query_one("#step_result", Static).update("Multi-SKU Inspector · Read-Only (All Presets)")
+        self._set_status("Scanning all Google One offers (read-only)...")
+        self._set_message("Inspecting Pro, Ultra, Plus, Storage and Discount SKUs. No checkout will open.")
+        self.run_all_offers()
+
     @on(Button.Pressed, "#stop")
     def stop_pressed(self) -> None:
         if not self.busy:
             return
-        if self.current_step in (0, 1):
+        if self._is_readonly_active():
             self._cancel_readonly()
         else:
             self._stop_after_step = True
@@ -502,7 +550,7 @@ class GoogleAITUI(App[None]):
             self.query_one("#stop", Button).disabled = True
 
     def _cancel_readonly(self) -> None:
-        if not self.busy or self.current_step not in (0, 1) or self._cancel_requested:
+        if not self.busy or not self._is_readonly_active() or self._cancel_requested:
             return
         self._cancel_requested = True
         self._stop_after_step = True
@@ -570,7 +618,7 @@ class GoogleAITUI(App[None]):
             self.exit()
             return
         self._exit_after_step = True
-        if self.current_step in (0, 1):
+        if self._is_readonly_active():
             self._cancel_readonly()
             self._set_message("Stopping read-only check; toolkit will exit when it stops.")
         else:
@@ -585,6 +633,7 @@ class GoogleAITUI(App[None]):
         self.busy = True
         self.sequence = sequence
         self.current_step = step
+        self._readonly_scan = False
         self._stop_after_step = False
         self._cancel_requested = False
         self._exit_after_step = False
@@ -610,6 +659,7 @@ class GoogleAITUI(App[None]):
         )
         self.query_one("#activity", Static).update(activity_label)
         self.query_one("#quickstart", Button).disabled = True
+        self.query_one("#all_offers", Button).disabled = True
         self.query_one("#run", Button).disabled = True
         self.query_one("#sequence", Button).disabled = True
         self.query_one("#mode", Select).disabled = True
@@ -698,6 +748,88 @@ class GoogleAITUI(App[None]):
         finally:
             self._child = None
 
+    @work(thread=True, exclusive=True)
+    def run_all_offers(self) -> None:
+        try:
+            script = self.repo / "query_sku.py"
+            if not script.is_file():
+                raise FileNotFoundError("query_sku.py is missing from the project directory")
+            if self._cancel_requested:
+                self.call_from_thread(
+                    self._finished_all_offers,
+                    Outcome("cancelled", "Check stopped", "Cancelled read-only offer scan."),
+                )
+                return
+            code = self._execute([sys.executable, str(script), "--preset", "all"])
+            if self._cancel_requested:
+                self.call_from_thread(
+                    self._finished_all_offers,
+                    Outcome("cancelled", "Check stopped", "Cancelled read-only offer scan."),
+                )
+                return
+            if code == 0:
+                self.call_from_thread(
+                    self._finished_all_offers,
+                    Outcome(
+                        "listed",
+                        "All offers loaded (read-only)",
+                        "Showing read-only Google Play BillingClient metadata below. "
+                        "Offer metadata does not guarantee checkout eligibility.",
+                    ),
+                )
+            else:
+                self.call_from_thread(
+                    self._finished_all_offers,
+                    Outcome(
+                        "tool_error",
+                        "All-SKU offer scan failed",
+                        "Check Android/Waydroid connection and review the log below. No checkout was started.",
+                    ),
+                )
+        except Exception as error:
+            self.call_from_thread(
+                self._finished_all_offers,
+                Outcome("exception", "Could not start SKU inspector",
+                        f"{type(error).__name__}: {error}. No checkout was started."),
+            )
+        finally:
+            self._child = None
+
+    def _finished_all_offers(self, outcome: Outcome) -> None:
+        self.busy = False
+        self._readonly_scan = False
+        self._last_outcome = outcome
+        self.query_one("#manual", Button).display = False
+        self.query_one("#manual", Button).disabled = True
+        self.query_one("#quickstart", Button).disabled = False
+        self.query_one("#all_offers", Button).disabled = False
+        self.query_one("#run", Button).disabled = False
+        self.query_one("#sequence", Button).disabled = False
+        self.query_one("#mode", Select).disabled = False
+        self.query_one("#step", Select).disabled = False
+        self._update_run_mode()
+        self.query_one("#stop", Button).disabled = True
+        self.query_one("#stop", Button).display = False
+        self.query_one("#next", Button).disabled = True
+        self.query_one("#next", Button).display = False
+        self.query_one("#exit", Button).disabled = False
+        self._started_at = None
+        self.query_one("#activity", Static).update("Read-only offer scan finished. Scroll below to inspect all SKUs.")
+        self._set_status(outcome.title)
+        instruction = outcome.instruction
+        if outcome.code in ("tool_error", "exception"):
+            diagnostic = self._visible_failure()
+            if diagnostic:
+                instruction = f"{instruction}  Last CLI message: {diagnostic}"
+        self._set_message(instruction)
+        if self._scan_summary:
+            self.query_one("#step_result", Static).update(self._scan_summary)
+        if self._exit_after_step:
+            self.exit()
+            return
+        if outcome.code not in ("listed", "cancelled"):
+            self.notify("Offer scan stopped; inspect the log below.", severity="warning")
+
     def _received(self, line: str) -> None:
         if not line:
             return
@@ -725,6 +857,8 @@ class GoogleAITUI(App[None]):
             self._set_message("Complete the requested action on Android, then click Completed.")
         if re.search(r"\bDevice\s+(emulator-\d+|[0-9.]+:\d+)\s*$", line):
             self.query_one("#device", Static).update("Device  •  " + escape(line.split()[-1]))
+        if line.startswith("Summary:"):
+            self._scan_summary = line.strip()
         # Trust only the structured PowerShell "Account <email>" status line,
         # not arbitrary log messages containing an email address.
         account = re.match(
@@ -754,6 +888,7 @@ class GoogleAITUI(App[None]):
         self.query_one("#manual", Button).display = False
         self.query_one("#manual", Button).disabled = True
         self.query_one("#quickstart", Button).disabled = False
+        self.query_one("#all_offers", Button).disabled = False
         self.query_one("#run", Button).disabled = False
         self.query_one("#sequence", Button).disabled = False
         self.query_one("#mode", Select).disabled = False

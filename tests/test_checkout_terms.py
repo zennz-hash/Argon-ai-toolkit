@@ -136,6 +136,58 @@ class CheckoutTests(unittest.TestCase):
         self.assertEqual(result["status"], "checkout_not_confirmed")
         verify.assert_not_called()
 
+    def test_pro18_build_js_targets_exact_product_and_offer(self):
+        script = app.build_js(plan="pro18", list_only=True)
+        self.assertIn('var PRODUCTS=["g1.2tb.ai.18months_eft"];', script)
+        self.assertIn('var PREFER="eft-18months";', script)
+        self.assertIn('"P1Y6M":18', script)
+
+    def test_pro18_checkout_terms_english_and_indonesian(self):
+        en = app.assess_checkout_terms(
+            "Google AI Pro (5 TB) Subscribe Today US$0.00 18-month free trial "
+            "Then US$19.99/month", "pro18")
+        self.assertEqual(en["reason"], "zero_today_and_duration_verified")
+        ind = app.assess_checkout_terms(
+            "Google AI Pro (5 TB) Langganan Hari ini Rp 0 Uji coba gratis 18 bulan "
+            "Lalu Rp 309.000/bulan", "pro18")
+        self.assertEqual(ind["reason"], "zero_today_and_duration_verified")
+        wrong = app.assess_checkout_terms(
+            "Google AI Pro (5 TB) Subscribe Today US$0.00 12-month free trial", "pro18")
+        self.assertEqual(wrong["reason"], "trial_duration_unverified")
+
+    def test_confirm_zero_no_tap_never_clicks_subscribe(self):
+        with patch.object(app, "ui_xml", return_value=(
+                 "Google AI Pro (5 TB) Subscribe Today $0 18-month free trial")), \
+             patch.object(app, "nodes", side_effect=lambda xml: [
+                 {"text": xml, "desc": ""}]), \
+             patch.object(app, "tap_text") as tapped:
+            out = app.confirm_zero(wait=2, expected_plan="pro18", no_tap=True)
+        self.assertFalse(out["confirmed"])
+        self.assertEqual(out["reason"], "awaiting_manual_confirmation")
+        tapped.assert_not_called()
+
+    def test_custom_catalog_offer_build_js_and_manual_review_only(self):
+        js = app.build_js(custom_product="g1.2tb.ai.2months_eft", custom_offer="eft-2months")
+        self.assertIn('var PRODUCTS=["g1.2tb.ai.2months_eft"];', js)
+        self.assertIn('var PREFER="eft-2months";', js)
+        self.assertIn('"P4W3D":1', js)
+        self.assertIn('"P8W6D":2', js)
+
+        with self.assertRaises(ValueError):
+            app.build_js(custom_product="bad.sku", custom_offer="eft-1month")
+        with self.assertRaises(ValueError):
+            app.build_js(custom_product="g1.2tb.ai.2months_eft", custom_offer="null")
+
+        with patch.object(app, "ui_xml", return_value=(
+                 "100 GB (Google One) Langganan Hari ini Rp 0 Uji coba gratis 1 bulan")), \
+             patch.object(app, "nodes", side_effect=lambda xml: [
+                 {"text": xml, "desc": ""}]), \
+             patch.object(app, "tap_text") as tapped:
+            out = app.confirm_zero(wait=2, expected_plan="custom", no_tap=False)
+        self.assertFalse(out["confirmed"])
+        self.assertEqual(out["reason"], "awaiting_manual_confirmation")
+        tapped.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
